@@ -1,0 +1,19 @@
+# Fichiers d'environnement et secrets
+.env
+.env.local
+.env.*.local
+
+# Dépendances Composer (si installées localement)
+/vendor/
+
+# Fichiers temporaires et logs
+*.log
+/logs/
+.DS_Store
+Thumbs.db
+
+# IDE / Éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo

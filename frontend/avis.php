@@ -1,108 +1,103 @@
 <?php
-// Activation complète du rapport d'erreurs
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
 require_once __DIR__ . "/../includes/config.php";
 require_once __DIR__ . "/../includes/db.php";
 require_once __DIR__ . "/../includes/functions.php";
-
-// Début du buffer de sortie pour capturer les erreurs
-ob_start();
 
 start_secure_session();
 
 $errors = [];
 $success = "";
 $avis = [];
+$eligible_rdvs = [];
 
-// Vérification de la connexion à la base de données
-if ($mysqli->connect_error) {
-    die("Erreur de connexion à la base de données: " . $mysqli->connect_error);
-}
-
-// Récupérer les avis approuvés
-$sql_avis = "SELECT a.note, a.commentaire, a.created_at, 
-                    u.username AS client_nom, 
-                    co.specialite AS coiffeur_specialite
-             FROM avis a
-             JOIN users u ON a.client_id = u.id
-             LEFT JOIN coiffeurs co ON a.coiffeur_id = co.id
-             WHERE a.statut = 'approved'
-             ORDER BY a.created_at DESC";
-
-if ($result_avis = $mysqli->query($sql_avis)) {
-    if ($result_avis->num_rows > 0) {
-        while ($row = $result_avis->fetch_assoc()) {
-            $avis[] = $row;
+// Si l'utilisateur est connecté, récupérer ses rendez-vous terminés n'ayant pas encore d'avis (Phase 3.3)
+if (is_logged_in()) {
+    $client_id = (int) $_SESSION["user_id"];
+    $sql_eligible = "SELECT r.id, r.date_heure, r.coiffeur_id, s.nom AS service_nom, u.username AS coiffeur_nom
+                     FROM rendezvous r
+                     JOIN services s ON r.service_id = s.id
+                     JOIN coiffeurs c ON r.coiffeur_id = c.id
+                     JOIN users u ON c.user_id = u.id
+                     LEFT JOIN avis a ON a.rendezvous_id = r.id
+                     WHERE r.client_id = ?
+                       AND r.statut = 'completed'
+                       AND a.id IS NULL
+                     ORDER BY r.date_heure DESC";
+    if ($stmtE = $mysqli->prepare($sql_eligible)) {
+        $stmtE->bind_param("i", $client_id);
+        if ($stmtE->execute()) {
+            $resE = $stmtE->get_result();
+            while ($rowE = $resE->fetch_assoc()) {
+                $eligible_rdvs[$rowE['id']] = $rowE;
+            }
         }
+        $stmtE->close();
     }
-    $result_avis->free();
-} else {
-    $errors[] = "Erreur SQL: " . $mysqli->error;
-    error_log("Erreur SQL dans avis.php: " . $mysqli->error);
 }
 
-// Gérer la soumission d'un avis
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["submit_avis"])) {
+// Gérer la soumission d'un avis (Phase 3.3 & Phase 4.1)
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["submit_avis"])) {
     if (!is_logged_in()) {
         $errors[] = "Vous devez être connecté pour laisser un avis.";
+    } elseif (!verify_csrf_token()) {
+        $errors[] = "Jeton de sécurité invalide. Veuillez réessayer.";
     } else {
-        $client_id = $_SESSION["user_id"];
-        $note = sanitize_input($_POST["note"]);
-        $commentaire = sanitize_input($_POST["commentaire"]);
-        $coiffeur_id = isset($_POST["coiffeur_id"]) && !empty($_POST["coiffeur_id"]) ? (int)$_POST["coiffeur_id"] : NULL;
+        $client_id = (int) $_SESSION["user_id"];
+        $rdv_id = validate_int($_POST["rendezvous_id"] ?? null, 1);
+        $note = validate_int($_POST["note"] ?? null, 1, 5);
+        $commentaire = sanitize_input($_POST["commentaire"] ?? "", 1500);
 
-        if (empty($note) || $note < 1 || $note > 5) {
+        if (!$rdv_id || !isset($eligible_rdvs[$rdv_id])) {
+            $errors[] = "Veuillez sélectionner un rendez-vous terminé valide n'ayant pas encore fait l'objet d'un avis.";
+        }
+        if ($note === null) {
             $errors[] = "La note doit être comprise entre 1 et 5.";
         }
-        if (empty($commentaire)) {
-            $errors[] = "Le commentaire est obligatoire.";
+        if ($commentaire === "" || mb_strlen($commentaire) < 3) {
+            $errors[] = "Veuillez saisir un commentaire d'au moins 3 caractères.";
         }
 
         if (empty($errors)) {
-            // CORRECTION ICI : Gestion du NULL pour coiffeur_id
-            $sql_insert_avis = "INSERT INTO avis (client_id, coiffeur_id, note, commentaire, statut) VALUES (?, ?, ?, ?, 'pending')";
-            
+            $coiffeur_id = (int) $eligible_rdvs[$rdv_id]['coiffeur_id'];
+            $sql_insert_avis = "INSERT INTO avis (client_id, coiffeur_id, rendezvous_id, note, commentaire, statut) VALUES (?, ?, ?, ?, ?, 'pending')";
             if ($stmt = $mysqli->prepare($sql_insert_avis)) {
-                // Types conditionnels
-                if ($coiffeur_id === NULL) {
-                    $stmt->bind_param("iiss", $client_id, $note, $commentaire);
-                } else {
-                    $stmt->bind_param("iiis", $client_id, $coiffeur_id, $note, $commentaire);
-                }
-                
+                $stmt->bind_param("iiiis", $client_id, $coiffeur_id, $rdv_id, $note, $commentaire);
                 if ($stmt->execute()) {
-                    $success = "Votre avis a été soumis avec succès et est en attente de modération.";
-                    $_POST = array(); // Réinitialisation
+                    $success = "Votre avis a été soumis avec succès et sera publié après modération.";
+                    unset($eligible_rdvs[$rdv_id]);
+                    $_POST = [];
                 } else {
-                    $errors[] = "Erreur lors de la soumission de l'avis: " . $stmt->error;
+                    $errors[] = "Erreur lors de l'enregistrement de votre avis.";
                 }
                 $stmt->close();
             } else {
-                $errors[] = "Erreur de préparation de la requête: " . $mysqli->error;
+                $errors[] = "Erreur interne lors de la préparation de l'avis.";
             }
         }
     }
 }
 
-// Récupérer la liste des coiffeurs pour le formulaire d'avis
-$coiffeurs_for_avis = [];
-$sql_coiffeurs_avis = "SELECT c.id, u.username 
-                       FROM coiffeurs c
-                       JOIN users u ON c.user_id = u.id";
-                       
-if ($result_coiffeurs_avis = $mysqli->query($sql_coiffeurs_avis)) {
-    while ($row = $result_coiffeurs_avis->fetch_assoc()) {
-        $coiffeurs_for_avis[] = $row;
+// Récupérer les avis approuvés
+$sql_avis = "SELECT a.note, a.commentaire, a.created_at,
+                    u.username AS client_nom,
+                    uco.username AS coiffeur_nom,
+                    co.specialite AS coiffeur_specialite
+             FROM avis a
+             JOIN users u ON a.client_id = u.id
+             LEFT JOIN coiffeurs co ON a.coiffeur_id = co.id
+             LEFT JOIN users uco ON co.user_id = uco.id
+             WHERE a.statut = 'approved'
+             ORDER BY a.created_at DESC";
+
+if ($result_avis = $mysqli->query($sql_avis)) {
+    while ($row = $result_avis->fetch_assoc()) {
+        $avis[] = $row;
     }
-    $result_coiffeurs_avis->free();
-} else {
-    $errors[] = "Erreur lors de la récupération des coiffeurs: " . $mysqli->error;
+    $result_avis->free();
 }
 
-// Inclusion du header
+$preselected_rdv_id = validate_int($_GET['rendezvous_id'] ?? ($_POST['rendezvous_id'] ?? null), 1);
+
 include __DIR__ . "/../includes/header.php";
 ?>
 
@@ -114,58 +109,60 @@ include __DIR__ . "/../includes/header.php";
 
 <section class="reviews">
     <div class="container">
-        <p class="intro-text">Découvrez ce que nos clients pensent de nos services et laissez votre propre avis pour nous aider à nous améliorer !</p>
+        <p class="intro-text">Découvrez ce que nos clients pensent de nos prestations et partagez votre expérience après votre rendez-vous !</p>
 
-        <!-- Affichage des messages d'erreur/succès -->
         <?php if (!empty($errors)): ?>
             <div class="alert alert-danger">
-                <h3>Erreurs :</h3>
                 <?php foreach ($errors as $error): ?>
-                    <p><?php echo $error; ?></p>
+                    <p><?php echo htmlspecialchars($error); ?></p>
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
 
         <?php if (!empty($success)): ?>
             <div class="alert alert-success">
-                <p><?php echo $success; ?></p>
+                <p><?php echo htmlspecialchars($success); ?></p>
             </div>
         <?php endif; ?>
 
-        <!-- Formulaire d'avis -->
         <h2>Laisser un avis</h2>
-        <?php if (is_logged_in()): ?>
+        <?php if (!is_logged_in()): ?>
+            <p>Veuillez vous <a href="<?php echo BASE_URL; ?>login.php">connecter</a> pour laisser un avis sur une prestation terminée.</p>
+        <?php elseif (empty($eligible_rdvs)): ?>
+            <div class="alert alert-info">
+                <p>Seuls les clients ayant effectué un rendez-vous terminé peuvent publier un avis (un avis par rendez-vous).</p>
+            </div>
+        <?php else: ?>
             <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post" class="review-form">
+                <?php echo csrf_field(); ?>
                 <div class="form-group">
-                    <label for="note">Votre note (1-5) :</label>
-                    <input type="number" id="note" name="note" min="1" max="5" value="<?php echo isset($_POST["note"]) ? htmlspecialchars($_POST["note"]) : ""; ?>" required>
-                </div>
-                <div class="form-group">
-                    <label for="coiffeur_id">Coiffeur (optionnel) :</label>
-                    <select name="coiffeur_id" id="coiffeur_id">
-                        <option value="">-- Aucun coiffeur spécifique --</option>
-                        <?php foreach ($coiffeurs_for_avis as $coiffeur): ?>
-                            <option value="<?php echo $coiffeur["id"]; ?>" <?php echo (isset($_POST["coiffeur_id"]) && $_POST["coiffeur_id"] == $coiffeur["id"]) ? 'selected' : ''; ?>>
-                                <?php echo htmlspecialchars($coiffeur["username"]); ?>
+                    <label for="rendezvous_id">Rendez-vous concerné :</label>
+                    <select name="rendezvous_id" id="rendezvous_id" required>
+                        <option value="">-- Sélectionnez votre prestation terminée --</option>
+                        <?php foreach ($eligible_rdvs as $rdv): ?>
+                            <option value="<?php echo (int) $rdv['id']; ?>" <?php echo ($preselected_rdv_id === (int) $rdv['id']) ? 'selected' : ''; ?>>
+                                <?php echo date('d/m/Y', strtotime($rdv['date_heure'])); ?> –
+                                <?php echo htmlspecialchars($rdv['service_nom']); ?> (avec <?php echo htmlspecialchars($rdv['coiffeur_nom']); ?>)
                             </option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="form-group">
+                    <label for="note">Votre note (1 à 5) :</label>
+                    <input type="number" id="note" name="note" min="1" max="5" value="<?php echo isset($_POST["note"]) ? htmlspecialchars((string) $_POST["note"]) : "5"; ?>" required>
+                </div>
+                <div class="form-group">
                     <label for="commentaire">Votre commentaire :</label>
-                    <textarea id="commentaire" name="commentaire" rows="5" required><?php echo isset($_POST["commentaire"]) ? htmlspecialchars($_POST["commentaire"]) : ""; ?></textarea>
+                    <textarea id="commentaire" name="commentaire" rows="4" maxlength="1500" required><?php echo isset($_POST["commentaire"]) ? htmlspecialchars((string) $_POST["commentaire"]) : ""; ?></textarea>
                 </div>
                 <button type="submit" name="submit_avis" class="btn">Soumettre l'avis</button>
             </form>
-        <?php else: ?>
-            <p>Veuillez vous <a href="<?php echo BASE_URL; ?>login.php">connecter</a> pour laisser un avis.</p>
         <?php endif; ?>
 
-        <!-- Liste des avis -->
         <h2>Avis des clients</h2>
         <?php if (empty($avis)): ?>
             <div class="alert alert-info">
-                <p>Aucun avis n'a encore été publié ou approuvé.</p>
+                <p>Aucun avis n'a encore été publié.</p>
             </div>
         <?php else: ?>
             <div class="reviews-list">
@@ -173,16 +170,16 @@ include __DIR__ . "/../includes/header.php";
                     <div class="review-item">
                         <p class="review-meta">
                             <strong><?php echo htmlspecialchars($review["client_nom"]); ?></strong>
-                            <?php if (!empty($review["coiffeur_specialite"])): ?>
-                                - Spécialité: <?php echo htmlspecialchars($review["coiffeur_specialite"]); ?>
+                            <?php if (!empty($review["coiffeur_nom"])): ?>
+                                — Coiffeur : <?php echo htmlspecialchars($review["coiffeur_nom"]); ?>
                             <?php endif; ?>
                             <br>Posté le <?php echo date("d/m/Y à H:i", strtotime($review["created_at"])); ?>
                         </p>
                         <div class="stars">
-                            <?php for ($i = 0; $i < $review["note"]; $i++): ?>
+                            <?php for ($i = 0; $i < (int) $review["note"]; $i++): ?>
                                 <i class="fas fa-star"></i>
                             <?php endfor; ?>
-                            <?php for ($i = $review["note"]; $i < 5; $i++): ?>
+                            <?php for ($i = (int) $review["note"]; $i < 5; $i++): ?>
                                 <i class="far fa-star"></i>
                             <?php endfor; ?>
                         </div>
@@ -194,8 +191,4 @@ include __DIR__ . "/../includes/header.php";
     </div>
 </section>
 
-<?php 
-include __DIR__ . "/../includes/footer.php";
-
-// Vider le buffer et afficher
-ob_end_flush();
+<?php include __DIR__ . "/../includes/footer.php"; ?>

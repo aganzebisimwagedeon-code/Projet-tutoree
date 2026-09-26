@@ -1,4 +1,48 @@
-/* Ce fichier peut être utilisé pour des ajustements responsives plus spécifiques si nécessaire. */
-/* Pour l'instant, les règles responsives sont incluses dans style.css */
+/* Ajustements responsives pour écrans mobiles et tablettes (Phase 6) */
 
+@media (max-width: 768px) {
+    header .container {
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+    }
 
+    header nav ul {
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        padding: 0;
+    }
+
+    header nav ul li {
+        margin: 4px 6px;
+    }
+
+    .table-responsive {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .dashboard-stats,
+    .service-grid,
+    .team-grid {
+        grid-template-columns: 1fr !important;
+    }
+
+    .appointment-form form,
+    .auth-form form,
+    .review-form {
+        padding: 15px;
+    }
+
+    .btn, button.btn {
+        width: 100%;
+        margin-bottom: 6px;
+        text-align: center;
+    }
+
+    td .btn, td button.btn {
+        width: auto;
+    }
+}

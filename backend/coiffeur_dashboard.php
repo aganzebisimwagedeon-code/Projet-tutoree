@@ -2,64 +2,56 @@
 require_once __DIR__ . "/../includes/config.php";
 require_once __DIR__ . "/../includes/db.php";
 require_once __DIR__ . "/../includes/functions.php";
+require_once __DIR__ . "/../services/NotificationService.php";
 
 start_secure_session();
+require_role('coiffeur');
 
-// Vérifier si l'utilisateur est connecté et a le rôle coiffeur
-if (!is_logged_in() || !has_role('coiffeur')) {
-    redirect(BASE_URL . "login.php");
+$coiffeur_username = $_SESSION["username"] ?? "Coiffeur";
+$user_id = (int) $_SESSION["user_id"];
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["mark_notifications_read"])) {
+    if (verify_csrf_token()) {
+        NotificationService::markAllRead($mysqli, $user_id);
+    }
 }
 
-$coiffeur_username = $_SESSION["username"];
-$user_id = $_SESSION["user_id"];
-
-// Récupérer l'ID du coiffeur dans la table coiffeurs
-$sql_coiffeur = "SELECT id FROM coiffeurs WHERE user_id = ?";
+$sql_coiffeur = "SELECT id FROM coiffeurs WHERE user_id = ? LIMIT 1";
 $coiffeur_table_id = null;
 if ($stmt = $mysqli->prepare($sql_coiffeur)) {
     $stmt->bind_param("i", $user_id);
     $stmt->execute();
     $result = $stmt->get_result();
     if ($row = $result->fetch_assoc()) {
-        $coiffeur_table_id = $row["id"];
+        $coiffeur_table_id = (int) $row["id"];
     }
     $stmt->close();
 }
 
-// Statistiques du tableau de bord pour le coiffeur
 $total_appointments = 0;
 $pending_appointments = 0;
 $completed_appointments = 0;
 
-// Total des rendez-vous pour ce coiffeur (CORRECTION: utiliser coiffeur_table_id)
-$sql_total_appointments = "SELECT COUNT(*) AS total FROM rendezvous WHERE coiffeur_id = ?";
-if ($stmt = $mysqli->prepare($sql_total_appointments)) {
-    $stmt->bind_param("i", $coiffeur_table_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $total_appointments = $result->fetch_assoc()["total"];
-    $stmt->close();
+if ($coiffeur_table_id) {
+    $sql_stats = "SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN statut = 'pending' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN statut = 'completed' THEN 1 ELSE 0 END) AS completed
+                  FROM rendezvous
+                  WHERE coiffeur_id = ?";
+    if ($stmt = $mysqli->prepare($sql_stats)) {
+        $stmt->bind_param("i", $coiffeur_table_id);
+        if ($stmt->execute()) {
+            $stats = $stmt->get_result()->fetch_assoc();
+            $total_appointments = (int) ($stats["total"] ?? 0);
+            $pending_appointments = (int) ($stats["pending"] ?? 0);
+            $completed_appointments = (int) ($stats["completed"] ?? 0);
+        }
+        $stmt->close();
+    }
 }
 
-// Rendez-vous en attente pour ce coiffeur
-$sql_pending_appointments = "SELECT COUNT(*) AS pending FROM rendezvous WHERE coiffeur_id = ? AND statut = 'pending'";
-if ($stmt = $mysqli->prepare($sql_pending_appointments)) {
-    $stmt->bind_param("i", $coiffeur_table_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $pending_appointments = $result->fetch_assoc()["pending"];
-    $stmt->close();
-}
-
-// Rendez-vous terminés pour ce coiffeur
-$sql_completed_appointments = "SELECT COUNT(*) AS completed FROM rendezvous WHERE coiffeur_id = ? AND statut = 'completed'";
-if ($stmt = $mysqli->prepare($sql_completed_appointments)) {
-    $stmt->bind_param("i", $coiffeur_table_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $completed_appointments = $result->fetch_assoc()["completed"];
-    $stmt->close();
-}
+$notifications = NotificationService::getUserNotifications($mysqli, $user_id, 8);
 
 include __DIR__ . "/../includes/header.php";
 ?>
@@ -77,6 +69,27 @@ include __DIR__ . "/../includes/header.php";
             <p>Voici votre activité aujourd'hui</p>
         </div>
 
+        <?php if (!empty($notifications)): ?>
+            <div style="background:#fff; border-left:4px solid #4361ee; padding:15px; margin-bottom:25px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0;">Notifications récentes</h3>
+                    <form method="post" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" style="margin:0;">
+                        <?php echo csrf_field(); ?>
+                        <input type="hidden" name="mark_notifications_read" value="1">
+                        <button type="submit" class="btn btn-sm">Tout marquer comme lu</button>
+                    </form>
+                </div>
+                <ul style="margin:10px 0 0; padding-left:20px;">
+                    <?php foreach ($notifications as $notif): ?>
+                        <li style="margin-bottom:6px; <?php echo empty($notif['lu']) ? 'font-weight:bold;' : 'color:#666;'; ?>">
+                            <?php echo htmlspecialchars($notif['titre']); ?> — <?php echo htmlspecialchars($notif['message']); ?>
+                            <small style="color:#888;">(<?php echo date('d/m/Y H:i', strtotime($notif['created_at'])); ?>)</small>
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
+
         <div class="dashboard-stats">
             <div class="stat-card bg-primary">
                 <div class="stat-icon">
@@ -87,7 +100,7 @@ include __DIR__ . "/../includes/header.php";
                     <p><?php echo $total_appointments; ?></p>
                 </div>
             </div>
-            
+
             <div class="stat-card bg-warning">
                 <div class="stat-icon">
                     <i class="fas fa-hourglass-half"></i>
@@ -97,7 +110,7 @@ include __DIR__ . "/../includes/header.php";
                     <p><?php echo $pending_appointments; ?></p>
                 </div>
             </div>
-            
+
             <div class="stat-card bg-success">
                 <div class="stat-icon">
                     <i class="fas fa-check-circle"></i>
@@ -116,12 +129,12 @@ include __DIR__ . "/../includes/header.php";
                     <i class="fas fa-calendar-check"></i>
                     <span>Gérer mes Rendez-vous</span>
                 </a>
-                
+
                 <a href="<?php echo BASE_URL; ?>backend/coiffeur_planning.php" class="action-card">
                     <i class="fas fa-clock"></i>
-                    <span>Gérer mon Planning</span>
+                    <span>Gérer mon Planning &amp; Absences</span>
                 </a>
-                
+
                 <a href="<?php echo BASE_URL; ?>backend/coiffeur_profil.php" class="action-card">
                     <i class="fas fa-user"></i>
                     <span>Mon Profil</span>
@@ -132,7 +145,6 @@ include __DIR__ . "/../includes/header.php";
 </section>
 
 <style>
-/* Styles améliorés pour le tableau de bord */
 .welcome-header {
     background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
     color: white;
@@ -140,19 +152,16 @@ include __DIR__ . "/../includes/header.php";
     border-radius: 10px;
     margin-bottom: 30px;
 }
-
 .welcome-header h2 {
     margin: 0;
     font-size: 2rem;
 }
-
 .dashboard-stats {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 20px;
     margin-bottom: 40px;
 }
-
 .stat-card {
     display: flex;
     border-radius: 10px;
@@ -160,7 +169,6 @@ include __DIR__ . "/../includes/header.php";
     box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     color: white;
 }
-
 .stat-icon {
     background: rgba(0,0,0,0.15);
     width: 80px;
@@ -169,39 +177,32 @@ include __DIR__ . "/../includes/header.php";
     justify-content: center;
     font-size: 2rem;
 }
-
 .stat-content {
     flex: 1;
     padding: 20px;
 }
-
 .stat-content h3 {
     margin: 0 0 10px 0;
     font-size: 1.2rem;
 }
-
 .stat-content p {
     margin: 0;
     font-size: 2.5rem;
     font-weight: bold;
 }
-
 .bg-primary { background: #4361ee; }
 .bg-warning { background: #f8961e; }
 .bg-success { background: #2a9d8f; }
-
 .dashboard-actions h3 {
     font-size: 1.5rem;
     margin-bottom: 20px;
     color: #333;
 }
-
 .action-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
     gap: 20px;
 }
-
 .action-card {
     display: flex;
     flex-direction: column;
@@ -217,18 +218,15 @@ include __DIR__ . "/../includes/header.php";
     color: #333;
     border: 1px solid #eee;
 }
-
 .action-card:hover {
     transform: translateY(-5px);
     box-shadow: 0 6px 20px rgba(0,0,0,0.15);
 }
-
 .action-card i {
     font-size: 3rem;
     margin-bottom: 15px;
     color: #4361ee;
 }
-
 .action-card span {
     font-size: 1.2rem;
     font-weight: 500;
